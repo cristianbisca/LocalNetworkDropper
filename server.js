@@ -1,0 +1,539 @@
+const express = require('express');
+const http = require('http');
+const { WebSocketServer, WebSocketServer: ws } = require('ws');
+const path = require('path');
+const os = require('os');
+const crypto = require('crypto');
+const multer = require('multer');
+const fs = require('fs');
+const MulticastDNS = require('multicast-dns');
+
+// ─── Configuration ──────────────────────────────────────────────────────────
+const PORT = process.env.LND_PORT || 4200;
+const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+const UPLOAD_DIR = path.join(__dirname, 'uploads');
+
+// Ensure upload directory exists
+if (!fs.existsSync(UPLOAD_DIR)) {
+  fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+// ─── Device Identity ────────────────────────────────────────────────────────
+const deviceId = crypto.randomUUID().slice(0, 8);
+const deviceName = `${os.hostname()}-${deviceId}`;
+
+// ─── In-Memory Store ────────────────────────────────────────────────────────
+// Shared clipboard buffer
+let clipboardBuffer = { text: '', timestamp: 0 };
+
+// Received items queue (text snippets and file metadata)
+const itemsQueue = [];
+
+// Connected clients tracking
+const connectedClients = new Map(); // WebSocket -> clientInfo
+
+// ─── Express App ────────────────────────────────────────────────────────────
+const app = express();
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// Serve static files from public directory
+app.use(express.static(path.join(__dirname, 'public')));
+
+// Multer for file uploads - save to memory stream then disk
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    cb(null, UPLOAD_DIR);
+  },
+  filename: (req, file, cb) => {
+    const timestamp = Date.now();
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${timestamp}-${name}${ext}`);
+  }
+});
+
+const upload = multer({
+  storage,
+  limits: { fileSize: MAX_FILE_SIZE },
+  fileFilter: (req, file, cb) => {
+    // Accept all file types
+    cb(null, true);
+  }
+});
+
+// ─── HTTP API Routes ────────────────────────────────────────────────────────
+
+// Get server info and local IP addresses
+app.get('/api/info', (req, res) => {
+  const interfaces = os.networkInterfaces();
+  const localIPs = [];
+  
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        localIPs.push({ interface: name, address: iface.address });
+      }
+    }
+  }
+  
+  res.json({
+    deviceId,
+    deviceName,
+    port: PORT,
+    localIPs,
+    clientCount: connectedClients.size,
+    clipboard: clipboardBuffer
+  });
+});
+
+// Get items queue
+app.get('/api/items', (req, res) => {
+  res.json(itemsQueue.slice(-50)); // Last 50 items
+});
+
+// Clear items queue
+app.post('/api/items/clear', (req, res) => {
+  itemsQueue.length = 0;
+  res.json({ success: true });
+});
+
+// Delete a specific item
+app.delete('/api/items/:id', (req, res) => {
+  const index = itemsQueue.findIndex(item => item.id === req.params.id);
+  if (index !== -1) {
+    // Remove associated file if exists
+    const item = itemsQueue[index];
+    if (item.filePath && fs.existsSync(item.filePath)) {
+      try { fs.unlinkSync(item.filePath); } catch (e) {}
+    }
+    itemsQueue.splice(index, 1);
+    res.json({ success: true });
+  } else {
+    res.status(404).json({ error: 'Item not found' });
+  }
+});
+
+// Set clipboard text
+app.post('/api/clipboard', (req, res) => {
+  const { text } = req.body;
+  if (text !== undefined) {
+    clipboardBuffer = { 
+      text: String(text).slice(0, 10000), // Max 10K chars
+      timestamp: Date.now() 
+    };
+    // Broadcast to all connected WebSocket clients
+    broadcastToAll({
+      type: 'clipboard_update',
+      payload: clipboardBuffer
+    });
+  }
+  res.json({ success: true, clipboard: clipboardBuffer });
+});
+
+// Get clipboard text
+app.get('/api/clipboard', (req, res) => {
+  res.json({ clipboard: clipboardBuffer });
+});
+
+// Upload file endpoint
+app.post('/api/upload', upload.single('file'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+  
+  const item = {
+    id: crypto.randomUUID().slice(0, 8),
+    type: 'file',
+    name: req.file.originalname,
+    size: req.file.size,
+    mimeType: req.file.mimetype,
+    filePath: req.file.path,
+    fileName: req.file.filename,
+    sourceDevice: deviceName,
+    timestamp: Date.now()
+  };
+  
+  itemsQueue.push(item);
+  
+  // Broadcast to all WebSocket clients
+  broadcastToAll({
+    type: 'new_item',
+    payload: { ...item, filePath: undefined }
+  });
+  
+  res.json({ success: true, item });
+});
+
+// Upload text snippet
+app.post('/api/text', (req, res) => {
+  const { text, title } = req.body;
+  
+  if (!text || String(text).trim().length === 0) {
+    return res.status(400).json({ error: 'No text provided' });
+  }
+  
+  const item = {
+    id: crypto.randomUUID().slice(0, 8),
+    type: 'text',
+    title: title || String(text).slice(0, 50),
+    content: String(text).slice(0, 50000), // Max 50K chars
+    sourceDevice: deviceName,
+    timestamp: Date.now()
+  };
+  
+  itemsQueue.push(item);
+  
+  broadcastToAll({
+    type: 'new_item',
+    payload: item
+  });
+  
+  res.json({ success: true, item });
+});
+
+// Download file endpoint
+app.get('/api/download/:fileName', (req, res) => {
+  const filePath = path.join(UPLOAD_DIR, req.params.fileName);
+  
+  // Prevent directory traversal
+  if (!filePath.startsWith(UPLOAD_DIR)) {
+    return res.status(403).json({ error: 'Access denied' });
+  }
+  
+  if (!fs.existsSync(filePath)) {
+    return res.status(404).json({ error: 'File not found' });
+  }
+  
+  res.download(filePath, (err) => {
+    // Optionally clean up after download
+  });
+});
+
+// Health check
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', uptime: process.uptime() });
+});
+
+// ─── HTTP Server & WebSocket ────────────────────────────────────────────────
+const server = http.createServer(app);
+const wss = new WebSocketServer({ server });
+
+function broadcastToAll(message, excludeClient = null) {
+  const data = JSON.stringify(message);
+  for (const client of wss.clients) {
+    if (client !== excludeClient && client.readyState === ws.OPEN) {
+      client.send(data);
+    }
+  }
+}
+
+function broadcastWithSender(message, senderClient) {
+  const data = JSON.stringify(message);
+  for (const client of wss.clients) {
+    if (client !== senderClient && client.readyState === ws.OPEN) {
+      client.send(data);
+    }
+  }
+}
+
+wss.on('connection', (ws, req) => {
+  const clientInfo = {
+    id: crypto.randomUUID().slice(0, 8),
+    userAgent: req.headers['user-agent'] || 'unknown',
+    connectedAt: Date.now()
+  };
+  
+  connectedClients.set(ws, clientInfo);
+  
+  // Send current state to new client
+  ws.send(JSON.stringify({
+    type: 'init',
+    payload: {
+      clientId: clientInfo.id,
+      deviceName,
+      clipboard: clipboardBuffer,
+      items: itemsQueue.slice(-50),
+      clientCount: connectedClients.size
+    }
+  }));
+  
+  // Broadcast new client connected
+  broadcastWithSender({
+    type: 'client_connected',
+    payload: {
+      clientId: clientInfo.id,
+      deviceName,
+      clientCount: connectedClients.size
+    }
+  }, ws);
+  
+  ws.on('message', (data) => {
+    let message;
+    try {
+      message = JSON.parse(data.toString());
+    } catch (e) {
+      console.error('Invalid WebSocket message:', data.toString());
+      return;
+    }
+    
+    switch (message.type) {
+      case 'clipboard_update': {
+        clipboardBuffer = {
+          text: String(message.payload.text || '').slice(0, 10000),
+          timestamp: Date.now()
+        };
+        broadcastWithSender({
+          type: 'clipboard_update',
+          payload: clipboardBuffer
+        }, ws);
+        break;
+      }
+      
+      case 'text_share': {
+        const item = {
+          id: crypto.randomUUID().slice(0, 8),
+          type: 'text',
+          title: message.payload.title || String(message.payload.text || '').slice(0, 50),
+          content: String(message.payload.text || '').slice(0, 50000),
+          sourceDevice: `${deviceName}-${clientInfo.id}`,
+          timestamp: Date.now()
+        };
+        itemsQueue.push(item);
+        broadcastWithSender({
+          type: 'new_item',
+          payload: item
+        }, ws);
+        break;
+      }
+      
+      case 'file_metadata': {
+        // Client is announcing a file (for direct P2P transfer)
+        broadcastWithSender({
+          type: 'file_announced',
+          payload: {
+            ...message.payload,
+            sourceClientId: clientInfo.id,
+            sourceDevice: deviceName
+          }
+        }, ws);
+        break;
+      }
+      
+      case 'request_file': {
+        // Send file transfer request to specific client
+        const targetWs = findClientByWs(message.payload.clientId);
+        if (targetWs) {
+          targetWs.send(JSON.stringify({
+            type: 'file_requested',
+            payload: {
+              fileName: message.payload.fileName,
+              requesterClientId: clientInfo.id,
+              requesterDevice: deviceName
+            }
+          }));
+        }
+        break;
+      }
+      
+      case 'ping': {
+        ws.send(JSON.stringify({ type: 'pong', payload: { timestamp: Date.now() } }));
+        break;
+      }
+    }
+  });
+  
+  ws.on('close', () => {
+    connectedClients.delete(ws);
+    
+    broadcastToAll({
+      type: 'client_disconnected',
+      payload: {
+        clientId: clientInfo.id,
+        clientCount: connectedClients.size
+      }
+    });
+  });
+  
+  ws.on('error', (err) => {
+    console.error('WebSocket error:', err.message);
+    connectedClients.delete(ws);
+  });
+});
+
+function findClientByWs(clientId) {
+  for (const [clientWs, info] of connectedClients.entries()) {
+    if (info.id === clientId) return clientWs;
+  }
+  return null;
+}
+
+// ─── mDNS / DNS-SD Service Discovery ──────────────────────────────────────
+function setupMDNS() {
+  const localIPs = [];
+  const interfaces = os.networkInterfaces();
+  
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        localIPs.push(iface.address);
+      }
+    }
+  }
+  
+  const primaryIP = localIPs[0] || '127.0.0.1';
+  
+  try {
+    const mdns = new MulticastDNS();
+    
+    // Track discovered devices to avoid duplicates
+    const discoveredDevices = new Map(); // name -> { address, lastSeen }
+    const DISCOVERY_TIMEOUT = 60000; // 60 seconds
+    
+    // Listen for queries/responses from other LND instances
+    mdns.on('response', (packet) => {
+      const now = Date.now();
+      
+      // Look for LND services in answers
+      for (const answer of packet.answers || []) {
+        if (answer.name && answer.name.endsWith('.lnd.local') && answer.type === 'A') {
+          // Skip our own device
+          if (answer.name.includes(deviceId)) continue;
+          
+          const existing = discoveredDevices.get(answer.name);
+          
+          if (!existing) {
+            // New device discovered
+            console.log(`[mDNS] Device discovered: ${answer.name} at ${answer.data}`);
+            broadcastToAll({
+              type: 'device_discovered',
+              payload: {
+                name: answer.name.replace('.lnd.local', ''),
+                address: answer.data,
+                port: PORT
+              }
+            });
+            discoveredDevices.set(answer.name, { address: answer.data, lastSeen: now });
+          } else {
+            // Update last seen time
+            existing.lastSeen = now;
+          }
+        }
+      }
+      
+      // Clean up stale entries periodically
+      for (const [name, info] of discoveredDevices.entries()) {
+        if (now - info.lastSeen > DISCOVERY_TIMEOUT) {
+          console.log(`[mDNS] Device left: ${name}`);
+          broadcastToAll({
+            type: 'device_left',
+            payload: { name: name.replace('.lnd.local', '') }
+          });
+          discoveredDevices.delete(name);
+        }
+      }
+    });
+    
+    // Announce this service by responding to queries from OTHER devices only
+    mdns.on('query', (packet) => {
+      for (const question of packet.questions || []) {
+        if (question.name && question.name.endsWith('.lnd.local')) {
+          mdns.respond([{
+            name: `lnd-${deviceId}.lnd.local`,
+            type: 'A',
+            ttl: 120,
+            data: primaryIP
+          }]);
+        }
+      }
+    });
+    
+    // Periodically announce our presence (every 30s)
+    const announceInterval = setInterval(() => {
+      mdns.query('lnd.lnd.local');
+    }, 30000);
+    
+    process.on('SIGINT', () => clearInterval(announceInterval));
+    
+    console.log(`[mDNS] Advertising as "lnd-${deviceId}.lnd.local" on ${primaryIP}:${PORT}`);
+  } catch (err) {
+    console.warn('[mDNS] Failed to setup mDNS:', err.message);
+    console.warn('[mDNS] Device discovery will not be available.');
+  }
+}
+
+// ─── Cleanup old uploads periodically ──────────────────────────────────────
+function cleanupOldUploads() {
+  const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+  
+  try {
+    if (fs.existsSync(UPLOAD_DIR)) {
+      const files = fs.readdirSync(UPLOAD_DIR);
+      const now = Date.now();
+      
+      for (const file of files) {
+        const filePath = path.join(UPLOAD_DIR, file);
+        const stats = fs.statSync(filePath);
+        
+        if (now - stats.mtimeMs > maxAge) {
+          fs.unlinkSync(filePath);
+          console.log(`[Cleanup] Removed old upload: ${file}`);
+        }
+      }
+    }
+  } catch (err) {
+    console.error('[Cleanup] Error cleaning uploads:', err.message);
+  }
+}
+
+// Clean up every hour
+setInterval(cleanupOldUploads, 60 * 60 * 1000);
+
+// ─── Start Server ──────────────────────────────────────────────────────────
+server.listen(PORT, () => {
+  const interfaces = os.networkInterfaces();
+  const localIPs = [];
+  
+  for (const name of Object.keys(interfaces)) {
+    for (const iface of interfaces[name]) {
+      if (iface.family === 'IPv4' && !iface.internal) {
+        localIPs.push(`  http://${iface.address}:${PORT}`);
+      }
+    }
+  }
+  
+  console.log('');
+  console.log('╔══════════════════════════════════════════════════════════╗');
+  console.log('║         LND - Local Network File & Clip Dropper          ║');
+  console.log('╠══════════════════════════════════════════════════════════╣');
+  console.log(`║  Device: ${deviceName.padEnd(41)}║`);
+  console.log(`║  Port:   ${String(PORT).padEnd(41)}║`);
+  console.log('╠══════════════════════════════════════════════════════════╣');
+  console.log('║  Access URLs:                                           ║');
+  localIPs.forEach(ip => {
+    console.log(`║${ip.padEnd(47)}║`);
+  });
+  console.log('╠══════════════════════════════════════════════════════════╣');
+  console.log('║  Open any of these URLs on devices on the same network   ║');
+  console.log('║  to share files, text, and clipboard instantly!          ║');
+  console.log('╚══════════════════════════════════════════════════════════╝');
+  console.log('');
+  
+  // Setup mDNS discovery
+  setupMDNS();
+});
+
+// ─── Graceful Shutdown ──────────────────────────────────────────────────────
+process.on('SIGINT', () => {
+  console.log('\n[Shutdown] Closing server...');
+  wss.clients.forEach(ws => ws.close());
+  server.close(() => process.exit(0));
+});
+
+process.on('SIGTERM', () => {
+  console.log('[Shutdown] Server terminated.');
+  wss.clients.forEach(ws => ws.close());
+  server.close(() => process.exit(0));
+});
+
+module.exports = app;

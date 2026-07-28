@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LND - Local Network Dropper</title>
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>📡</text></svg>">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Header -->
+  <header class="app-header">
+    <div class="header-left">
+      <h1 class="app-logo">
+        <span class="logo-icon">📡</span>
+        <span class="logo-text">LND</span>
+      </h1>
+      <p class="app-subtitle">Local Network File & Clip Dropper</p>
+    </div>
+    <div class="header-right">
+      <div class="connection-status" id="connectionStatus">
+        <span class="status-dot disconnected"></span>
+        <span class="status-text">Connecting...</span>
+      </div>
+      <div class="client-count" id="clientCount">
+        <span class="count-icon">👥</span>
+        <span class="count-number">0</span> devices
+      </div>
+    </div>
+  </header>
+
+  <!-- Main Content -->
+  <main class="app-main">
+    <!-- Drop Zone -->
+    <section class="drop-zone-section" id="dropZoneSection">
+      <div class="drop-zone" id="dropZone">
+        <div class="drop-zone-content">
+          <div class="drop-icon">📥</div>
+          <h2 class="drop-title">Drop Files or Text Here</h2>
+          <p class="drop-subtitle">Drag & drop files, or click to browse</p>
+          <input type="file" id="fileInput" multiple hidden>
+          <button class="btn btn-primary" id="browseBtn">Browse Files</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tabs -->
+    <div class="tabs-container">
+      <button class="tab active" data-tab="shared-clipboard">📋 Clipboard</button>
+      <button class="tab" data-tab="received-items">📦 Received</button>
+      <button class="tab" data-tab="share-text">✏️ Share Text</button>
+    </div>
+
+    <!-- Tab: Shared Clipboard -->
+    <section class="tab-content active" id="shared-clipboard">
+      <div class="clipboard-section">
+        <div class="clipboard-header">
+          <h3>Shared Clipboard</h3>
+          <span class="clipboard-status" id="clipboardStatus"></span>
+        </div>
+        <div class="clipboard-body">
+          <textarea 
+            id="clipboardText" 
+            placeholder="Type or paste text here... Changes sync across all connected devices in real-time."
+            rows="6"
+          ></textarea>
+        </div>
+        <div class="clipboard-footer">
+          <button class="btn btn-secondary" id="copyClipboardBtn">📋 Copy</button>
+          <span class="clipboard-hint">Auto-syncs across all devices on the network</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab: Received Items -->
+    <section class="tab-content" id="received-items">
+      <div class="items-section">
+        <div class="items-header">
+          <h3>Received Items</h3>
+          <button class="btn btn-secondary btn-sm" id="clearItemsBtn">Clear All</button>
+        </div>
+        <div class="items-list" id="itemsList">
+          <div class="empty-state" id="emptyState">
+            <div class="empty-icon">📭</div>
+            <p>No items received yet.</p>
+            <p class="empty-hint">Files and text shared from other devices will appear here.</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Tab: Share Text -->
+    <section class="tab-content" id="share-text">
+      <div class="share-text-section">
+        <h3>Share Text Snippet</h3>
+        <p class="share-text-hint">Send a text snippet to all connected devices.</p>
+        <input 
+          type="text" 
+          id="shareTextTitle" 
+          placeholder="Title (optional)"
+          class="input-title"
+        >
+        <textarea 
+          id="shareTextInput" 
+          placeholder="Enter text to share..."
+          rows="8"
+        ></textarea>
+        <button class="btn btn-primary" id="shareTextBtn">📤 Share Text</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- Toast Notifications -->
+  <div class="toast-container" id="toastContainer"></div>
+
+  <!-- Hidden elements for drag overlay -->
+  <div class="drag-overlay" id="dragOverlay">
+    <div class="drag-overlay-content">
+      <div class="drag-overlay-icon">📥</div>
+      <h2>Drop to Share</h2>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
