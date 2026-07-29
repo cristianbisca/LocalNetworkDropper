@@ -13,6 +13,13 @@
   let clipboardSyncTimeout = null;
   const items = new Map(); // id -> item data
 
+  // Debug logging - controlled by server via init message, or ?debug=1 URL param
+  let debugMode = new URLSearchParams(window.location.search).get('debug') === '1';
+
+  function dbg(...args) {
+    if (debugMode) console.log('[LND-DEBUG]', ...args);
+  }
+
   // ─── DOM Elements ─────────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
@@ -47,13 +54,13 @@
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
     const wsUrl = `${protocol}://${window.location.host}`;
     
-    console.log('[LND] Connecting to WebSocket:', wsUrl);
+    dbg('Connecting to WebSocket:', wsUrl);
     updateConnectionStatus('connecting');
     
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
-      console.log('[LND] WebSocket connected');
+      dbg('WebSocket connected');
       updateConnectionStatus('connected');
       clearTimeout(reconnectTimer);
     };
@@ -61,9 +68,9 @@
     ws.onmessage = (event) => {
       try {
         const rawData = event.data;
-        console.log('[LND] <<< WS raw message received:', rawData.slice(0, 200));
+        dbg('<<< WS raw message received:', rawData.slice(0, 200));
         const message = JSON.parse(rawData);
-        console.log('[LND] <<< WS parsed type:', message.type);
+        dbg('<<< WS parsed type:', message.type);
         handleMessage(message);
       } catch (err) {
         console.error('[LND] Failed to parse message:', err);
@@ -71,7 +78,7 @@
     };
     
     ws.onclose = () => {
-      console.log('[LND] WebSocket disconnected');
+      dbg('WebSocket disconnected');
       updateConnectionStatus('disconnected');
       scheduleReconnect();
     };
@@ -123,6 +130,9 @@
     switch (message.type) {
       case 'init':
         clientId = message.payload.clientId;
+        if (typeof message.payload.debug === 'boolean') {
+          debugMode = message.payload.debug;
+        }
         updateClientCount(message.payload.clientCount);
         
         // Restore clipboard
@@ -180,10 +190,10 @@
     const remoteText = payload.text || '';
     const currentText = clipboardText.value;
     
-    console.log('[LND] clipboard_update received:', { 
-      remoteLen: remoteText.length, 
-      currentLen: currentText.length, 
-      same: remoteText === currentText 
+    dbg('clipboard_update received:', {
+      remoteLen: remoteText.length,
+      currentLen: currentText.length,
+      same: remoteText === currentText
     });
     
     // Only update if the content differs from what we currently have.
@@ -193,9 +203,9 @@
       lastLocalText = remoteText;
       clipboardText.value = remoteText;
       updateClipboardStatus('Synced');
-      console.log('[LND] Clipboard updated from remote:', remoteText.slice(0, 50));
+      dbg('Clipboard updated from remote:', remoteText.slice(0, 50));
     } else {
-      console.log('[LND] Clipboard skipped (content identical)');
+      dbg('Clipboard skipped (content identical)');
     }
   }
 
@@ -206,8 +216,8 @@
   function sendClipboardUpdate() {
     if (ws && ws.readyState === WebSocket.OPEN) {
       const text = clipboardText.value;
-      
-      console.log('[LND] Sending clipboard_update:', { len: text.length, preview: text.slice(0, 50) });
+
+      dbg('Sending clipboard_update:', { len: text.length, preview: text.slice(0, 50) });
       
       ws.send(JSON.stringify({
         type: 'clipboard_update',
@@ -222,13 +232,12 @@
         updateClipboardStatus('Synced ✓');
       }, 1000);
     } else {
-      console.log('[LND] Cannot send clipboard_update: WebSocket not open (state:', ws?.readyState, ')');
+      dbg('Cannot send clipboard_update: WebSocket not open (state:', ws?.readyState, ')');
     }
   }
 
   // Debounced clipboard sync - reduced delay for snappier feel
   clipboardText.addEventListener('input', () => {
-    console.log('[LND] input event on clipboard textarea');
     clearTimeout(clipboardSyncTimeout);
     clipboardSyncTimeout = setTimeout(sendClipboardUpdate, 500);
   });

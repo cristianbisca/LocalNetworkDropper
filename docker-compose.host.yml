@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  lnd:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: lnd-dropper
+    restart: unless-stopped
+    environment:
+      - LND_PORT=4200
+    # Persist uploaded files across container rebuilds
+    volumes:
+      - ./uploads:/app/uploads
+    # Host network mode for mDNS multicast discovery
+    network_mode: host

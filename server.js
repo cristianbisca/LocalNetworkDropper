@@ -19,6 +19,7 @@ const MulticastDNS = require('multicast-dns');
 
 // ─── Configuration ──────────────────────────────────────────────────────────
 const PORT = process.env.LND_PORT || 4200;
+const DEBUG = process.env.LND_DEBUG === '1' || process.env.LND_DEBUG === 'true'; // disabled by default
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 
@@ -253,8 +254,10 @@ wss.on('connection', (ws, req) => {
     connectedAt: Date.now()
   };
   
-  stderrLog(`[WS] Client connected: ${clientInfo.id} (total: ${connectedClients.size + 1})`);
-  stderrLog(`[WS] User-Agent: ${clientInfo.userAgent}`);
+  if (DEBUG) {
+    stderrLog(`[WS] Client connected: ${clientInfo.id} (total: ${connectedClients.size + 1})`);
+    stderrLog(`[WS] User-Agent: ${clientInfo.userAgent}`);
+  }
   
   connectedClients.set(ws, clientInfo);
   
@@ -264,6 +267,7 @@ wss.on('connection', (ws, req) => {
     payload: {
       clientId: clientInfo.id,
       deviceName,
+      debug: DEBUG,
       clipboard: clipboardBuffer,
       items: itemsQueue.slice(-50),
       clientCount: connectedClients.size
@@ -296,15 +300,19 @@ wss.on('connection', (ws, req) => {
           text: String(message.payload.text || '').slice(0, 10000),
           timestamp: Date.now()
         };
-        stderrLog(`[WS] clipboard_update from ${clientInfoId}: "${clipboardBuffer.text.slice(0,50)}" (len=${clipboardBuffer.text.length})`);
-        
+        if (DEBUG) {
+          stderrLog(`[WS] clipboard_update from ${clientInfoId}: "${clipboardBuffer.text.slice(0,50)}" (len=${clipboardBuffer.text.length})`);
+        }
+
         // Broadcast to ALL clients including sender - the client-side handles echo prevention via content-diff
         broadcastToAll({
           type: 'clipboard_update',
           payload: clipboardBuffer
         });
-        
-        stderrLog(`[WS] Broadcast clipboard_update to ${wss.clients.size} total clients`);
+
+        if (DEBUG) {
+          stderrLog(`[WS] Broadcast clipboard_update to ${wss.clients.size} total clients`);
+        }
         break;
       }
       
@@ -362,7 +370,9 @@ wss.on('connection', (ws, req) => {
   });
   
   ws.on('close', () => {
-    stderrLog(`[WS] Client disconnected: ${clientInfo.id} (total: ${connectedClients.size - 1})`);
+    if (DEBUG) {
+      stderrLog(`[WS] Client disconnected: ${clientInfo.id} (total: ${connectedClients.size - 1})`);
+    }
     connectedClients.delete(ws);
     
     broadcastToAll({
