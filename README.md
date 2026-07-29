@@ -145,6 +145,10 @@ LND_PORT=8080 npm start
 LocalNetworkDropper/
 ├── package.json          # Dependencies and scripts
 ├── server.js             # Express + WebSocket server
+├── Dockerfile            # Multi-stage Docker build (builder + runtime)
+├── docker-compose.yml    # Bridge network compose config
+├── docker-compose.host.yml  # Host network compose config (mDNS)
+├── .dockerignore         # Files excluded from Docker context
 ├── public/
 │   ├── index.html        # Main UI
 │   ├── styles.css        # Dark theme styling
@@ -159,6 +163,151 @@ LocalNetworkDropper/
 - Maximum file size: 100MB per file
 - Uploaded files are auto-deleted after 24 hours
 - For production use behind a router, consider adding authentication
+
+## 🐳 Docker Deployment
+
+### Dockerfile Overview
+
+The project uses a **multi-stage Docker build** for optimized image size and security:
+
+| Stage | Purpose |
+|---|---|
+| `builder` | Installs production dependencies with layer caching |
+| `runtime` | Minimal runtime image running as a **non-root user** (`appuser`) |
+
+The base image is `node:20-alpine`, supporting multi-arch builds (`amd64`, `arm64`, `armv7`).
+
+### Quick Start
+
+```bash
+# Build and run with docker-compose (bridge network)
+docker compose up -d --build
+
+# Access at http://<your-ip>:4200
+```
+
+### Multi-Architecture Builds
+
+Build for multiple platforms using Docker Buildx:
+
+```bash
+# Build for amd64 and arm64
+docker buildx build --platform linux/amd64,linux/arm64 -t lnd-dropper:latest .
+
+# Build, tag, and push to a registry
+docker buildx build --platform linux/amd64,linux/arm64 \
+  -t yourregistry/lnd-dropper:latest \
+  --push .
+
+# Build for Raspberry Pi (arm/v7)
+docker buildx build --platform linux/arm/v7 \
+  -t lnd-dropper:armv7 \
+  --load .
+```
+
+> **Note:** `--push` requires authentication to the target registry (`docker login`). Use `--load` to load the image into local Docker instead.
+
+### Pulling a Pre-Built Image
+
+If a pre-built image is available in a registry:
+
+```yaml
+# In docker-compose.yml, replace build: with image:
+services:
+  lnd:
+    image: yourregistry/lnd-dropper:latest
+    # ... rest of config
+```
+
+### Host Network Mode (Recommended for mDNS)
+
+mDNS device discovery requires multicast traffic, which may not work through bridge networking. For Hass OS or Raspberry Pi deployments, enable host network mode.
+
+**Option 1:** Use the included `docker-compose.host.yml`:
+
+```bash
+# Build and run with host network mode
+docker compose -f docker-compose.host.yml up -d --build
+```
+
+**Option 2:** Edit `docker-compose.yml` and uncomment `network_mode: host`:
+
+```yaml
+services:
+  lnd:
+    # ... other config ...
+    network_mode: host
+```
+
+> **Note:** With `network_mode: host`, the container uses the host's network directly. The `ports` mapping is not needed since the container listens on the host port.
+
+### Compose Files Comparison
+
+| File | Network Mode | Use Case |
+|---|---|---|
+| `docker-compose.yml` | Bridge (default) | Standard deployments, port-mapped access |
+| `docker-compose.host.yml` | Host | mDNS discovery, Hass OS, Raspberry Pi |
+
+### Environment Variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `LND_PORT` | `4200` | Port to listen on |
+
+```bash
+# Custom port via compose
+LND_PORT=8080 docker compose up -d
+
+# Or override in docker-compose.yml:
+# environment:
+#   - LND_PORT=8080
+```
+
+### Volume Persistence
+
+Uploaded files are persisted via the `./uploads:/app/uploads` volume mount. Files are still auto-cleaned after 24 hours by the application.
+
+```yaml
+volumes:
+  - ./uploads:/app/uploads    # Host directory -> Container path
+```
+
+### Health Check
+
+The container includes a built-in health check that pings `/api/health` every 30 seconds:
+
+```bash
+# Check health status
+docker inspect --format='{{.State.Health.Status}}' lnd-dropper
+
+# View health logs
+docker inspect --format='{{range .State.Health.Log}}{{.Output}}{{end}}' lnd-dropper
+```
+
+### Docker Commands Reference
+
+```bash
+# Build image only
+docker compose build
+
+# Start containers in background
+docker compose up -d
+
+# Stop containers
+docker compose down
+
+# View logs
+docker compose logs -f lnd
+
+# Rebuild and restart (after code changes)
+docker compose up -d --build
+
+# Remove containers and volumes (clean slate)
+docker compose down -v
+
+# Execute command inside running container
+docker exec -it lnd-dropper sh
+```
 
 ## 📄 License
 
