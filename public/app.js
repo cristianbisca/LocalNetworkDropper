@@ -60,7 +60,10 @@
     
     ws.onmessage = (event) => {
       try {
-        const message = JSON.parse(event.data);
+        const rawData = event.data;
+        console.log('[LND] <<< WS raw message received:', rawData.slice(0, 200));
+        const message = JSON.parse(rawData);
+        console.log('[LND] <<< WS parsed type:', message.type);
         handleMessage(message);
       } catch (err) {
         console.error('[LND] Failed to parse message:', err);
@@ -170,13 +173,29 @@
   }
 
   // ─── Clipboard Sync ──────────────────────────────────────────────────────
+  // Track the last text we locally typed to distinguish our own echo from remote updates
+  let lastLocalText = '';
+
   function handleClipboardUpdate(payload) {
-    const currentTime = Date.now();
+    const remoteText = payload.text || '';
+    const currentText = clipboardText.value;
     
-    // Only update if the change is recent (avoid loops)
-    if (payload.timestamp && payload.timestamp > currentTime - 2000) {
-      clipboardText.value = payload.text || '';
+    console.log('[LND] clipboard_update received:', { 
+      remoteLen: remoteText.length, 
+      currentLen: currentText.length, 
+      same: remoteText === currentText 
+    });
+    
+    // Only update if the content differs from what we currently have.
+    // This prevents echo loops without relying on fragile timestamp windows,
+    // and ensures remote changes always reach other devices regardless of latency.
+    if (remoteText !== currentText) {
+      lastLocalText = remoteText;
+      clipboardText.value = remoteText;
       updateClipboardStatus('Synced');
+      console.log('[LND] Clipboard updated from remote:', remoteText.slice(0, 50));
+    } else {
+      console.log('[LND] Clipboard skipped (content identical)');
     }
   }
 
@@ -188,24 +207,30 @@
     if (ws && ws.readyState === WebSocket.OPEN) {
       const text = clipboardText.value;
       
+      console.log('[LND] Sending clipboard_update:', { len: text.length, preview: text.slice(0, 50) });
+      
       ws.send(JSON.stringify({
         type: 'clipboard_update',
         payload: { text }
       }));
       
+      lastLocalText = text;
       updateClipboardStatus('Syncing...');
       
       // Reset status after a delay
       setTimeout(() => {
         updateClipboardStatus('Synced ✓');
       }, 1000);
+    } else {
+      console.log('[LND] Cannot send clipboard_update: WebSocket not open (state:', ws?.readyState, ')');
     }
   }
 
-  // Debounced clipboard sync
+  // Debounced clipboard sync - reduced delay for snappier feel
   clipboardText.addEventListener('input', () => {
+    console.log('[LND] input event on clipboard textarea');
     clearTimeout(clipboardSyncTimeout);
-    clipboardSyncTimeout = setTimeout(sendClipboardUpdate, 800);
+    clipboardSyncTimeout = setTimeout(sendClipboardUpdate, 500);
   });
 
   // ─── Items Rendering ─────────────────────────────────────────────────────

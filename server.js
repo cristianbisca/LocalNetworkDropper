@@ -1,6 +1,15 @@
+// Use stderr for ALL logging - always unbuffered in Docker (unlike stdout/console.log)
+function stderrLog(msg) {
+  process.stderr.write('[LND] ' + msg + '\n');
+}
+
+// VERSION MARKER - if you don't see this in docker logs, the image wasn't updated
+stderrLog('=== LND-DROPPER v2026-07-29-STDERR-LOGGING STARTING ===');
+stderrLog('PID: ' + process.pid + ', Platform: ' + process.platform + ', Node: ' + process.version);
+
 const express = require('express');
 const http = require('http');
-const { WebSocketServer, WebSocketServer: ws } = require('ws');
+const { WebSocketServer, WebSocket } = require('ws');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
@@ -222,7 +231,7 @@ const wss = new WebSocketServer({ server });
 function broadcastToAll(message, excludeClient = null) {
   const data = JSON.stringify(message);
   for (const client of wss.clients) {
-    if (client !== excludeClient && client.readyState === ws.OPEN) {
+    if (client !== excludeClient && client.readyState === WebSocket.OPEN) {
       client.send(data);
     }
   }
@@ -231,7 +240,7 @@ function broadcastToAll(message, excludeClient = null) {
 function broadcastWithSender(message, senderClient) {
   const data = JSON.stringify(message);
   for (const client of wss.clients) {
-    if (client !== senderClient && client.readyState === ws.OPEN) {
+    if (client !== senderClient && client.readyState === WebSocket.OPEN) {
       client.send(data);
     }
   }
@@ -243,6 +252,9 @@ wss.on('connection', (ws, req) => {
     userAgent: req.headers['user-agent'] || 'unknown',
     connectedAt: Date.now()
   };
+  
+  stderrLog(`[WS] Client connected: ${clientInfo.id} (total: ${connectedClients.size + 1})`);
+  stderrLog(`[WS] User-Agent: ${clientInfo.userAgent}`);
   
   connectedClients.set(ws, clientInfo);
   
@@ -279,14 +291,20 @@ wss.on('connection', (ws, req) => {
     
     switch (message.type) {
       case 'clipboard_update': {
+        const clientInfoId = connectedClients.get(ws)?.id || 'unknown';
         clipboardBuffer = {
           text: String(message.payload.text || '').slice(0, 10000),
           timestamp: Date.now()
         };
-        broadcastWithSender({
+        stderrLog(`[WS] clipboard_update from ${clientInfoId}: "${clipboardBuffer.text.slice(0,50)}" (len=${clipboardBuffer.text.length})`);
+        
+        // Broadcast to ALL clients including sender - the client-side handles echo prevention via content-diff
+        broadcastToAll({
           type: 'clipboard_update',
           payload: clipboardBuffer
-        }, ws);
+        });
+        
+        stderrLog(`[WS] Broadcast clipboard_update to ${wss.clients.size} total clients`);
         break;
       }
       
@@ -344,6 +362,7 @@ wss.on('connection', (ws, req) => {
   });
   
   ws.on('close', () => {
+    stderrLog(`[WS] Client disconnected: ${clientInfo.id} (total: ${connectedClients.size - 1})`);
     connectedClients.delete(ws);
     
     broadcastToAll({
