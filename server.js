@@ -28,6 +28,10 @@ const LND_USER = process.env.LND_USER || '';
 const LND_PASSWORD = process.env.LND_PASSWORD || '';
 const AUTH_ENABLED = !!(LND_USER && LND_PASSWORD);
 
+stderrLog('Auth enabled: ' + (AUTH_ENABLED ? 'YES' : 'NO') +
+  ' | LND_USER set: ' + (!!LND_USER) +
+  ' | LND_PASSWORD set: ' + (!!LND_PASSWORD));
+
 if (AUTH_ENABLED) {
   stderrLog(`[AUTH] Authentication ENABLED - User: ${LND_USER}`);
 } else {

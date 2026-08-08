@@ -9,12 +9,12 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
-      - LND_PORT=4200
-      # Authentication (optional - set to enable)
-      - LND_USER=${LND_USER:-}
-      - LND_PASSWORD=${LND_PASSWORD:-}
+      LND_PORT: "4200"
+      # Authentication (optional - set via Portainer env vars or .env file)
+      LND_USER: ${LND_USER:-}
+      LND_PASSWORD: ${LND_PASSWORD:-}
       # Debug mode (optional)
-      - LND_DEBUG=${LND_DEBUG:-false}
+      LND_DEBUG: "${LND_DEBUG:-false}"
     # Persist uploaded files across container rebuilds
     volumes:
       - lnd_uploads:/app/uploads
