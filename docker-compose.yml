@@ -7,8 +7,7 @@ services:
       dockerfile: Dockerfile
     container_name: lnd-dropper
     restart: unless-stopped
-    ports:
-      - "${LND_PORT:-4200}:4200"
+    network_mode: host
     environment:
       - LND_PORT=4200
       # Authentication (optional - set to enable)
