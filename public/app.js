@@ -12,6 +12,8 @@
   let reconnectTimer = null;
   let clipboardSyncTimeout = null;
   const items = new Map(); // id -> item data
+  let authRequired = false;
+  let authToken = null;
 
   // Debug logging - controlled by server via init message, or ?debug=1 URL param
   let debugMode = new URLSearchParams(window.location.search).get('debug') === '1';
@@ -19,6 +21,120 @@
   function dbg(...args) {
     if (debugMode) console.log('[LND-DEBUG]', ...args);
   }
+
+  // ─── Authentication ──────────────────────────────────────────────────────
+  async function checkAuthStatus() {
+    try {
+      const response = await fetch('/api/auth/status');
+      const data = await response.json();
+      authRequired = data.authRequired;
+      dbg('Auth required:', authRequired);
+
+      if (authRequired) {
+        // Check for stored token
+        authToken = sessionStorage.getItem('lnd_token');
+        if (authToken) {
+          // Validate the token by making a test request
+          const valid = await validateToken();
+          if (!valid) {
+            sessionStorage.removeItem('lnd_token');
+            authToken = null;
+            showLoginOverlay();
+            return false;
+          }
+          hideLoginOverlay();
+          return true;
+        } else {
+          showLoginOverlay();
+          return false;
+        }
+      } else {
+        hideLoginOverlay();
+        return true;
+      }
+    } catch (err) {
+      console.error('[LND] Auth check failed:', err);
+      return true; // Allow access on error to avoid lockout
+    }
+  }
+
+  async function validateToken() {
+    try {
+      const response = await fetch('/api/health', {
+        headers: { 'X-LND-Token': authToken }
+      });
+      return response.ok;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function showLoginOverlay() {
+    const overlay = document.getElementById('loginOverlay');
+    if (overlay) overlay.style.display = 'flex';
+  }
+
+  function hideLoginOverlay() {
+    const overlay = document.getElementById('loginOverlay');
+    if (overlay) overlay.style.display = 'none';
+  }
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    const user = document.getElementById('loginUser').value;
+    const password = document.getElementById('loginPassword').value;
+    const errorEl = document.getElementById('loginError');
+
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user, password })
+      });
+
+      const data = await response.json();
+
+      if (data.success) {
+        authToken = data.token;
+        sessionStorage.setItem('lnd_token', authToken);
+        errorEl.style.display = 'none';
+        hideLoginOverlay();
+        dbg('Login successful');
+        // Now connect WebSocket with token
+        connectWebSocket();
+      } else {
+        errorEl.textContent = data.error || 'Login failed';
+        errorEl.style.display = 'block';
+      }
+    } catch (err) {
+      errorEl.textContent = 'Connection error. Please try again.';
+      errorEl.style.display = 'block';
+    }
+  }
+
+  // Attach login form handler
+  const loginForm = document.getElementById('loginForm');
+  if (loginForm) {
+    loginForm.addEventListener('submit', handleLogin);
+  }
+
+  // ─── API Helper with Auth ────────────────────────────────────────────────
+  async function authenticatedFetch(url, options = {}) {
+    if (!options.headers) options.headers = {};
+    if (authToken) {
+      options.headers['X-LND-Token'] = authToken;
+    }
+    return fetch(url, options);
+  }
+
+  // ─── Initialize with Auth Check ──────────────────────────────────────────
+  const authOk = await checkAuthStatus();
+  if (!authOk) {
+    // Wait for login before proceeding
+    return;
+  }
+
+  // Continue normal initialization after successful auth
 
   // ─── DOM Elements ─────────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
@@ -52,11 +168,16 @@
   // ─── WebSocket Connection ────────────────────────────────────────────────
   function connectWebSocket() {
     const protocol = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${protocol}://${window.location.host}`;
-    
+    let wsUrl = `${protocol}://${window.location.host}`;
+
+    // Append auth token as query parameter if available
+    if (authToken) {
+      wsUrl += `?token=${encodeURIComponent(authToken)}`;
+    }
+
     dbg('Connecting to WebSocket:', wsUrl);
     updateConnectionStatus('connecting');
-    
+
     ws = new WebSocket(wsUrl);
     
     ws.onopen = () => {
@@ -313,8 +434,12 @@
       try {
         showToast(`⏳ Uploading ${file.name}...`, 'info');
         
+        // Add auth header manually for FormData (authenticatedFetch doesn't set Content-Type for FormData)
+        const headers = {};
+        if (authToken) headers['X-LND-Token'] = authToken;
         const response = await fetch('/api/upload', {
           method: 'POST',
+          headers,
           body: formData
         });
         
@@ -356,7 +481,7 @@
     } else {
       // Fallback to HTTP API
       try {
-        const response = await fetch('/api/text', {
+        const response = await authenticatedFetch('/api/text', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ text, title })
@@ -561,7 +686,7 @@
 
   window.deleteItem = async function(itemId) {
     try {
-      const response = await fetch(`/api/items/${itemId}`, { method: 'DELETE' });
+      const response = await authenticatedFetch(`/api/items/${itemId}`, { method: 'DELETE' });
       const result = await response.json();
       
       if (result.success) {
@@ -616,9 +741,9 @@
   // Clear items button
   clearItemsBtn.addEventListener('click', async () => {
     if (items.size === 0) return;
-    
+
     try {
-      await fetch('/api/items/clear', { method: 'POST' });
+      await authenticatedFetch('/api/items/clear', { method: 'POST' });
       items.clear();
       
       // Remove all item cards

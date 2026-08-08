@@ -1,6 +1,6 @@
 # 📡 LND - Local Network File & Clip Dropper
 
-> Zero-config local web utility for sharing files, text snippets, and clipboard content across devices on the same network — no cloud services, no logins required.
+> Zero-config local web utility for sharing files, text snippets, and clipboard content across devices on the same network — no cloud services required. Optional authentication for exposed deployments.
 
 ![License](https://img.shields.io/badge/license-MIT-blue.svg)
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green.svg)
@@ -10,6 +10,7 @@
 - **📥 Drag & Drop File Sharing** — Drop files from any device onto the web interface to share them with all connected devices
 - **📋 Shared Clipboard** — Real-time synchronized clipboard buffer across all connected devices
 - **✏️ Text Snippets** — Share links, code snippets, or any text instantly
+- **🔐 Optional Authentication** — Protect your instance with username/password via environment variables
 - **🔍 mDNS Device Discovery** — Auto-discovers other LND instances on the local network via multicast DNS
 - **⚡ WebSocket Real-Time Sync** — Instant updates across all connected browser tabs/devices
 - **🌙 Dark Theme UI** — Clean, responsive interface that works on desktop and mobile
@@ -64,13 +65,27 @@ Open any of these URLs on devices connected to the same network.
 
 ## ⚙️ Configuration
 
+Copy `.env.example` to `.env` and adjust settings:
+
+```bash
+cp .env.example .env
+```
+
 | Environment Variable | Default | Description |
 |---|---|---|
 | `LND_PORT` | `4200` | Port to listen on |
+| `LND_USER` | _(empty)_ | Username for authentication (leave empty to disable) |
+| `LND_PASSWORD` | _(empty)_ | Password for authentication (leave empty to disable) |
+| `LND_DEBUG` | `false` | Enable verbose debug logging (`true` or `1`) |
+
+> **Authentication is optional.** Both `LND_USER` and `LND_PASSWORD` must be set (non-empty) to enable authentication. If only one is set, auth remains disabled.
 
 ```bash
-# Custom port
-LND_PORT=8080 npm start
+# Without authentication (default)
+npm start
+
+# With authentication
+LND_USER=admin LND_PASSWORD=supersecret npm start
 ```
 
 ## 🏗️ Architecture
@@ -107,20 +122,46 @@ LND_PORT=8080 npm start
 
 ### API Endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| `GET` | `/api/info` | Server info, local IPs, client count |
-| `GET` | `/api/items` | List last 50 received items |
-| `POST` | `/api/items/clear` | Clear all items |
-| `DELETE` | `/api/items/:id` | Delete a specific item |
-| `GET` | `/api/clipboard` | Get current clipboard content |
-| `POST` | `/api/clipboard` | Set clipboard (`{ text: "..." }`) |
-| `POST` | `/api/upload` | Upload file (multipart/form-data) |
-| `POST` | `/api/text` | Share text snippet (`{ text, title }`) |
-| `GET` | `/api/download/:fileName` | Download an uploaded file |
-| `GET` | `/api/health` | Health check |
+All endpoints (except auth endpoints) require authentication when `LND_USER` and `LND_PASSWORD` are set. Authentication is done via the `X-LND-Token` header (obtained from `/api/auth/login`) or HTTP Basic Auth.
+
+| Method | Path | Description | Auth Required |
+|---|---|---|---|
+| `GET` | `/api/auth/status` | Check if authentication is enabled | No |
+| `POST` | `/api/auth/login` | Login and receive a token (`{ user, password }`) | No |
+| `GET` | `/api/info` | Server info, local IPs, client count | Yes |
+| `GET` | `/api/items` | List last 50 received items | Yes |
+| `POST` | `/api/items/clear` | Clear all items | Yes |
+| `DELETE` | `/api/items/:id` | Delete a specific item | Yes |
+| `GET` | `/api/clipboard` | Get current clipboard content | Yes |
+| `POST` | `/api/clipboard` | Set clipboard (`{ text: "..." }`) | Yes |
+| `POST` | `/api/upload` | Upload file (multipart/form-data) | Yes |
+| `POST` | `/api/text` | Share text snippet (`{ text, title }`) | Yes |
+| `GET` | `/api/download/:fileName` | Download an uploaded file | Yes |
+| `GET` | `/api/health` | Health check | Yes |
+
+### Authentication Flow
+
+```bash
+# 1. Check if auth is enabled
+curl http://localhost:4200/api/auth/status
+# Response: { "authRequired": true }
+
+# 2. Login to get a token
+curl -X POST http://localhost:4200/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"user":"admin","password":"supersecret"}'
+# Response: { "success": true, "token": "eyJ1c2VyIjoi..." }
+
+# 3. Use the token in subsequent requests
+curl http://localhost:4200/api/info \
+  -H "X-LND-Token: eyJ1c2VyIjoi..."
+```
+
+> Tokens are valid for **24 hours** and are stored in `sessionStorage` on the client side (cleared when the browser tab closes).
 
 ### WebSocket Messages
+
+When authentication is enabled, append the token as a query parameter: `ws://host:port?token=xxx`
 
 **Client → Server:**
 ```json
@@ -143,16 +184,17 @@ LND_PORT=8080 npm start
 
 ```
 LocalNetworkDropper/
+├── .env.example          # Environment variables template
 ├── package.json          # Dependencies and scripts
-├── server.js             # Express + WebSocket server
+├── server.js             # Express + WebSocket server (with auth middleware)
 ├── Dockerfile            # Multi-stage Docker build (builder + runtime)
-├── docker-compose.yml    # Bridge network compose config
+├── docker-compose.yml    # Bridge network compose config (Portainer-ready)
 ├── docker-compose.host.yml  # Host network compose config (mDNS)
 ├── .dockerignore         # Files excluded from Docker context
 ├── public/
-│   ├── index.html        # Main UI
+│   ├── index.html        # Main UI (with login overlay)
 │   ├── styles.css        # Dark theme styling
-│   └── app.js            # Frontend logic
+│   └── app.js            # Frontend logic (with auth flow)
 └── uploads/              # Temporary file storage (auto-cleaned)
 ```
 
@@ -162,7 +204,9 @@ LocalNetworkDropper/
 - File downloads are protected against directory traversal attacks
 - Maximum file size: 100MB per file
 - Uploaded files are auto-deleted after 24 hours
-- For production use behind a router, consider adding authentication
+- Authentication is optional but recommended when exposing the service outside your LAN
+- Tokens expire after 24 hours and are stored in browser `sessionStorage`
+- The Docker container runs as a non-root user (`appuser`) for added security
 
 ## 🐳 Docker Deployment
 
@@ -253,28 +297,53 @@ services:
 | Variable | Default | Description |
 |---|---|---|
 | `LND_PORT` | `4200` | Port to listen on |
+| `LND_USER` | _(empty)_ | Username for authentication |
+| `LND_PASSWORD` | _(empty)_ | Password for authentication |
+| `LND_DEBUG` | `false` | Enable verbose debug logging |
 
 ```bash
-# Custom port via compose
-LND_PORT=8080 docker compose up -d
+# With authentication via .env file
+echo "LND_USER=admin" >> .env
+echo "LND_PASSWORD=your-secure-password" >> .env
+docker compose up -d
 
-# Or override in docker-compose.yml:
-# environment:
-#   - LND_PORT=8080
+# Or inline (not recommended for passwords)
+LND_USER=admin LND_PASSWORD=secret docker compose up -d
 ```
+
+### Deploy via Portainer (Git Repository)
+
+You can deploy this stack directly through **Portainer** using the Git repository:
+
+1. Navigate to **Stacks** → **Add stack** in Portainer
+2. Select **Repository** as the stack editor
+3. Configure:
+   - **Name**: `lnd-dropper`
+   - **Repository URL**: `https://github.com/cristianbisca/LocalNetworkDropper.git`
+   - **Branch**: `main`
+   - **Compose file**: `docker-compose.yml`
+4. Add environment variables (required for authentication):
+   - Click **Add variable** and enter:
+     - `LND_USER` → your desired username
+     - `LND_PASSWORD` → your desired password
+5. Click **Deploy the stack**
+
+Portainer will clone the repository, build the image, and start the container with your credentials configured. The `.env.example` file is included in the repo for reference — Portainer environment variables take precedence over any `.env` file.
+
+> **Tip:** To update to the latest version, go to the stack in Portainer and click **Pull & Restart** to fetch the latest changes from the repository.
 
 ### Volume Persistence
 
-Uploaded files are persisted via the `./uploads:/app/uploads` volume mount. Files are still auto-cleaned after 24 hours by the application.
+Uploaded files are persisted via a Docker named volume `lnd_uploads`. Files are still auto-cleaned after 24 hours by the application.
 
 ```yaml
 volumes:
-  - ./uploads:/app/uploads    # Host directory -> Container path
+  - lnd_uploads:/app/uploads    # Named volume -> Container path
 ```
 
 ### Health Check
 
-The container includes a built-in health check that pings `/api/health` every 30 seconds:
+The container includes a built-in health check that pings `/api/health` every 30 seconds (supports authenticated mode):
 
 ```bash
 # Check health status

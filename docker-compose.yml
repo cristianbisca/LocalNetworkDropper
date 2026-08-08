@@ -11,15 +11,15 @@ services:
       - "${LND_PORT:-4200}:4200"
     environment:
       - LND_PORT=4200
+      # Authentication (optional - set to enable)
+      - LND_USER=${LND_USER:-}
+      - LND_PASSWORD=${LND_PASSWORD:-}
+      # Debug mode (optional)
+      - LND_DEBUG=${LND_DEBUG:-false}
     # Persist uploaded files across container rebuilds
     volumes:
-      - ./uploads:/app/uploads
-    # mDNS requires host network on some setups.
-    # For Hass OS / Raspberry Pi, try "host" if device discovery doesn't work.
-    # Uncomment the next line if needed:
-    # network_mode: host
+      - lnd_uploads:/app/uploads
 
-networks:
-  default:
-    name: lnd-network
-    driver: bridge
+volumes:
+  lnd_uploads:
+    driver: local

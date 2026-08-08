@@ -23,6 +23,69 @@ const DEBUG = process.env.LND_DEBUG === '1' || process.env.LND_DEBUG === 'true';
 const MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
 
+// ─── Authentication Configuration ───────────────────────────────────────────
+const LND_USER = process.env.LND_USER || '';
+const LND_PASSWORD = process.env.LND_PASSWORD || '';
+const AUTH_ENABLED = !!(LND_USER && LND_PASSWORD);
+
+if (AUTH_ENABLED) {
+  stderrLog(`[AUTH] Authentication ENABLED - User: ${LND_USER}`);
+} else {
+  stderrLog('[AUTH] Authentication DISABLED - Set LND_USER and LND_PASSWORD to enable');
+}
+
+// ─── Authentication Middleware ──────────────────────────────────────────────
+function authenticate(req, res, next) {
+  if (!AUTH_ENABLED) {
+    return next();
+  }
+
+  // Check for Authorization header (Basic Auth)
+  const authHeader = req.headers.authorization;
+  if (authHeader && authHeader.startsWith('Basic ')) {
+    const encoded = authHeader.slice(6);
+    const decoded = Buffer.from(encoded, 'base64').toString('utf-8');
+    const [user, password] = decoded.split(':');
+    
+    if (user === LND_USER && password === LND_PASSWORD) {
+      req.authenticated = true;
+      return next();
+    }
+  }
+
+  // Check for custom auth headers (for API calls from frontend)
+  const authUser = req.headers['x-lnd-user'];
+  const authPass = req.headers['x-lnd-password'];
+  
+  if (authUser === LND_USER && authPass === LND_PASSWORD) {
+    req.authenticated = true;
+    return next();
+  }
+
+  // Check for Bearer token (JWT-like simple token)
+  const bearerToken = req.headers['x-lnd-token'];
+  if (bearerToken) {
+    try {
+      const decoded = JSON.parse(Buffer.from(bearerToken, 'base64').toString('utf-8'));
+      if (decoded.user === LND_USER && decoded.pass === LND_PASSWORD && Date.now() - decoded.ts < 86400000) {
+        req.authenticated = true;
+        return next();
+      }
+    } catch (e) {
+      // Invalid token, fall through
+    }
+  }
+
+  res.setHeader('WWW-Authenticate', 'Basic realm="LND Dropper"');
+  res.status(401).json({ error: 'Authentication required' });
+}
+
+// ─── Public Middleware - expose auth status to frontend ──────────────────────
+function authStatusMiddleware(req, res, next) {
+  res.setHeader('X-LND-Auth-Required', AUTH_ENABLED ? 'true' : 'false');
+  next();
+}
+
 // Ensure upload directory exists
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -73,6 +136,41 @@ const upload = multer({
 });
 
 // ─── HTTP API Routes ────────────────────────────────────────────────────────
+
+// ─── Auth Endpoints (public) ────────────────────────────────────────────────
+
+// Check if authentication is enabled
+app.get('/api/auth/status', (req, res) => {
+  res.json({ authRequired: AUTH_ENABLED });
+});
+
+// Login endpoint - returns a token for session-based auth
+app.post('/api/auth/login', (req, res) => {
+  if (!AUTH_ENABLED) {
+    return res.status(405).json({ error: 'Authentication is not enabled' });
+  }
+
+  const { user, password } = req.body;
+
+  if (user === LND_USER && password === LND_PASSWORD) {
+    // Generate a simple token (base64-encoded JSON with expiry)
+    const tokenData = {
+      user: LND_USER,
+      pass: LND_PASSWORD,
+      ts: Date.now()
+    };
+    const token = Buffer.from(JSON.stringify(tokenData)).toString('base64');
+
+    res.json({ success: true, token });
+  } else {
+    res.status(401).json({ error: 'Invalid credentials' });
+  }
+});
+
+// ─── Protected API Routes ───────────────────────────────────────────────────
+
+// Apply auth middleware to all /api routes (except auth endpoints above)
+app.use('/api', authenticate);
 
 // Get server info and local IP addresses
 app.get('/api/info', (req, res) => {
@@ -247,7 +345,38 @@ function broadcastWithSender(message, senderClient) {
   }
 }
 
+// ─── WebSocket Authentication Helper ────────────────────────────────────────
+function authenticateWebSocket(req) {
+  if (!AUTH_ENABLED) return true;
+
+  // Check query parameter token: ws?token=xxx
+  const urlParams = new URL(req.url, `http://localhost:${PORT}`);
+  const token = urlParams.searchParams.get('token');
+  
+  if (token) {
+    try {
+      const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
+      if (decoded.user === LND_USER && decoded.pass === LND_PASSWORD && Date.now() - decoded.ts < 86400000) {
+        return true;
+      }
+    } catch (e) {
+      // Invalid token
+    }
+  }
+
+  return false;
+}
+
 wss.on('connection', (ws, req) => {
+  // Authenticate WebSocket connection
+  if (!authenticateWebSocket(req)) {
+    if (AUTH_ENABLED) {
+      stderrLog('[WS] Rejected unauthenticated WebSocket connection');
+      ws.close(401, 'Authentication required');
+    }
+    return;
+  }
+
   const clientInfo = {
     id: crypto.randomUUID().slice(0, 8),
     userAgent: req.headers['user-agent'] || 'unknown',

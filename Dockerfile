@@ -37,9 +37,10 @@ USER appuser
 # Expose the port (default 4200, can be overridden via LND_PORT env var)
 EXPOSE 4200
 
-# Health check
+# Health check - supports both authenticated and unauthenticated modes
+# When LND_USER/LND_PASSWORD are set, uses Basic Auth; otherwise connects without auth
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD node -e "const http = require('http'); http.get('http://localhost:4200/api/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"
+  CMD node -e "const http = require('http'); const user = process.env.LND_USER || ''; const pass = process.env.LND_PASSWORD || ''; const opts = { hostname: 'localhost', port: process.env.LND_PORT || 4200, path: '/api/health' }; if (user && pass) opts.headers = { 'Authorization': 'Basic ' + Buffer.from(user + ':' + pass).toString('base64') }; http.get(opts, (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"
 
 # Make stdout/stderr unbuffered for docker logs visibility
 ENV FORCE_COLOR=1
