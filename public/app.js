@@ -3,7 +3,7 @@
  * Frontend Application Logic
  */
 
-(function() {
+(async function() {
   'use strict';
 
   // ─── State ────────────────────────────────────────────────────────────────
