@@ -7,9 +7,10 @@ services:
       dockerfile: Dockerfile
     container_name: lnd-dropper
     restart: unless-stopped
-    network_mode: host
+    ports:
+      - "13010:3000"
     environment:
-      LND_PORT: "4200"
+      LND_PORT: "3000"
       # Authentication (optional - set via Portainer env vars or .env file)
       LND_USER: ${LND_USER:-}
       LND_PASSWORD: ${LND_PASSWORD:-}
