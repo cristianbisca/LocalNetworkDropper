@@ -383,11 +383,10 @@
         <div class="item-actions">
           <a href="/api/download/${encodeURIComponent(item.fileName)}" 
              download="${escapeHtml(item.name)}" 
-             class="btn-icon" title="Download"
-             onclick="event.preventDefault(); downloadFile('${item.id}');">
+             class="btn-icon download-btn" title="Download">
             ⬇️
           </a>
-          <button class="btn-icon danger" title="Delete" onclick="deleteItem('${item.id}')">🗑️</button>
+          <button class="btn-icon danger delete-btn" title="Delete">🗑️</button>
         </div>
       `;
     } else if (item.type === 'text') {
@@ -404,12 +403,30 @@
           ${preview ? `<div class="text-item-preview">${escapeHtml(preview)}${(item.content || '').length > 200 ? '...' : ''}</div>` : ''}
         </div>
         <div class="item-actions">
-          <button class="btn-icon" title="Copy to clipboard" onclick="copyTextItem('${item.id}')">📋</button>
-          <button class="btn-icon danger" title="Delete" onclick="deleteItem('${item.id}')">🗑️</button>
+          <button class="btn-icon copy-btn" title="Copy to clipboard">📋</button>
+          <button class="btn-icon danger delete-btn" title="Delete">🗑️</button>
         </div>
       `;
     }
-    
+
+    const downloadBtn = card.querySelector('.download-btn');
+    if (downloadBtn) {
+      downloadBtn.addEventListener('click', (e) => {
+        e.preventDefault();
+        downloadFile(item.id);
+      });
+    }
+
+    const copyBtn = card.querySelector('.copy-btn');
+    if (copyBtn) {
+      copyBtn.addEventListener('click', () => copyTextItem(item.id));
+    }
+
+    const deleteBtn = card.querySelector('.delete-btn');
+    if (deleteBtn) {
+      deleteBtn.addEventListener('click', () => deleteItem(item.id));
+    }
+
     // Insert at the beginning (newest first)
     if (itemsList.contains(emptyState)) {
       itemsList.insertBefore(card, emptyState);

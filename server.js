@@ -114,6 +114,37 @@ const app = express();
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
+const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self'",
+  "img-src 'self' data:",
+  "font-src 'self'",
+  "connect-src 'self'",
+  "object-src 'none'",
+  "base-uri 'self'",
+  "frame-ancestors 'none'",
+  "form-action 'self'"
+].join('; ');
+
+// Re-apply security headers right before the response is flushed.
+// Express internals (finalhandler, send) override the CSP with
+// "default-src 'none'" on error responses (404/405/500), so the
+// initial setHeader alone is not enough.
+app.use((req, res, next) => {
+  res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+  res.setHeader('X-Frame-Options', 'DENY');
+  const originalEnd = res.end;
+  res.end = function (...args) {
+    if (!res.headersSent) {
+      res.setHeader('Content-Security-Policy', CONTENT_SECURITY_POLICY);
+      res.setHeader('X-Frame-Options', 'DENY');
+    }
+    return originalEnd.apply(res, args);
+  };
+  next();
+});
+
 // Serve static files from public directory
 app.use(express.static(path.join(__dirname, 'public')));
 

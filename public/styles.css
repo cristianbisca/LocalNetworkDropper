@@ -723,7 +723,7 @@ body {
   bottom: 0;
   background: var(--bg-primary);
   z-index: 9999;
-  display: flex;
+  display: none;
   align-items: center;
   justify-content: center;
   backdrop-filter: blur(8px);
@@ -801,6 +801,7 @@ body {
 }
 
 .login-error {
+  display: none;
   background: rgba(255, 107, 107, 0.1);
   border: 1px solid var(--error);
   border-radius: var(--border-radius-sm);
