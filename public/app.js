@@ -127,15 +127,6 @@
     return fetch(url, options);
   }
 
-  // ─── Initialize with Auth Check ──────────────────────────────────────────
-  const authOk = await checkAuthStatus();
-  if (!authOk) {
-    // Wait for login before proceeding
-    return;
-  }
-
-  // Continue normal initialization after successful auth
-
   // ─── DOM Elements ─────────────────────────────────────────────────────────
   const $ = (sel) => document.querySelector(sel);
   const $$ = (sel) => document.querySelectorAll(sel);
@@ -790,8 +781,15 @@
     }
   }, 30000);
 
+  // ─── Initialize with Auth Check ──────────────────────────────────────────
+  const authOk = await checkAuthStatus();
+  if (!authOk) {
+    // Login overlay is showing; handleLogin() calls connectWebSocket() on success
+    return;
+  }
+
   // ─── Initialize ──────────────────────────────────────────────────────────
   connectWebSocket();
-  
+
   console.log('[LND] Application initialized');
 })();
