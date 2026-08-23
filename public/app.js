@@ -32,17 +32,18 @@
 
       if (authRequired) {
         // Check for stored token
-        authToken = sessionStorage.getItem('lnd_token');
+        authToken = localStorage.getItem('lnd_token');
         if (authToken) {
           // Validate the token by making a test request
           const valid = await validateToken();
           if (!valid) {
-            sessionStorage.removeItem('lnd_token');
+            localStorage.removeItem('lnd_token');
             authToken = null;
             showLoginOverlay();
             return false;
           }
           hideLoginOverlay();
+          setLogoutVisible(true);
           return true;
         } else {
           showLoginOverlay();
@@ -50,6 +51,7 @@
         }
       } else {
         hideLoginOverlay();
+        setLogoutVisible(false);
         return true;
       }
     } catch (err) {
@@ -79,6 +81,29 @@
     if (overlay) overlay.style.display = 'none';
   }
 
+  function setLogoutVisible(visible) {
+    const btn = document.getElementById('logoutBtn');
+    if (btn) btn.style.display = visible ? '' : 'none';
+  }
+
+  function handleLogout() {
+    // Invalidate the session server-side, then drop local state
+    if (authToken) {
+      authenticatedFetch('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    }
+    localStorage.removeItem('lnd_token');
+    authToken = null;
+    clearTimeout(reconnectTimer);
+    reconnectTimer = null;
+    if (ws) {
+      ws.onclose = null; // Prevent auto-reconnect after logout
+      try { ws.close(); } catch (e) {}
+      ws = null;
+    }
+    setLogoutVisible(false);
+    showLoginOverlay();
+  }
+
   async function handleLogin(e) {
     e.preventDefault();
     const user = document.getElementById('loginUser').value;
@@ -96,9 +121,10 @@
 
       if (data.success) {
         authToken = data.token;
-        sessionStorage.setItem('lnd_token', authToken);
+        localStorage.setItem('lnd_token', authToken);
         errorEl.style.display = 'none';
         hideLoginOverlay();
+        setLogoutVisible(true);
         dbg('Login successful');
         // Now connect WebSocket with token
         connectWebSocket();
@@ -116,6 +142,12 @@
   const loginForm = document.getElementById('loginForm');
   if (loginForm) {
     loginForm.addEventListener('submit', handleLogin);
+  }
+
+  // Attach logout button handler
+  const logoutBtn = document.getElementById('logoutBtn');
+  if (logoutBtn) {
+    logoutBtn.addEventListener('click', handleLogout);
   }
 
   // ─── API Helper with Auth ────────────────────────────────────────────────

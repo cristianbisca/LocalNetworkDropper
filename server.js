@@ -38,6 +38,35 @@ if (AUTH_ENABLED) {
   stderrLog('[AUTH] Authentication DISABLED - Set LND_USER and LND_PASSWORD to enable');
 }
 
+// ─── Auth Sessions (server-side token store) ────────────────────────────────
+// Tokens are random opaque strings. The password is never embedded in them.
+const SESSION_TTL = 24 * 60 * 60 * 1000; // 24 hours
+const authSessions = new Map(); // token -> expiresAt (ms)
+
+function createSession() {
+  const token = crypto.randomBytes(32).toString('hex');
+  authSessions.set(token, Date.now() + SESSION_TTL);
+  // Opportunistic cleanup of expired sessions
+  if (authSessions.size > 1000) {
+    const now = Date.now();
+    for (const [t, exp] of authSessions) {
+      if (exp < now) authSessions.delete(t);
+    }
+  }
+  return token;
+}
+
+function isValidSession(token) {
+  if (!token) return false;
+  const exp = authSessions.get(token);
+  if (!exp) return false;
+  if (Date.now() > exp) {
+    authSessions.delete(token);
+    return false;
+  }
+  return true;
+}
+
 // ─── Authentication Middleware ──────────────────────────────────────────────
 function authenticate(req, res, next) {
   if (!AUTH_ENABLED) {
@@ -66,18 +95,11 @@ function authenticate(req, res, next) {
     return next();
   }
 
-  // Check for Bearer token (JWT-like simple token)
+  // Check for session token (opaque, validated against server-side store)
   const bearerToken = req.headers['x-lnd-token'];
-  if (bearerToken) {
-    try {
-      const decoded = JSON.parse(Buffer.from(bearerToken, 'base64').toString('utf-8'));
-      if (decoded.user === LND_USER && decoded.pass === LND_PASSWORD && Date.now() - decoded.ts < 86400000) {
-        req.authenticated = true;
-        return next();
-      }
-    } catch (e) {
-      // Invalid token, fall through
-    }
+  if (bearerToken && isValidSession(bearerToken)) {
+    req.authenticated = true;
+    return next();
   }
 
   res.setHeader('WWW-Authenticate', 'Basic realm="LND Dropper"');
@@ -111,6 +133,8 @@ const connectedClients = new Map(); // WebSocket -> clientInfo
 
 // ─── Express App ────────────────────────────────────────────────────────────
 const app = express();
+app.set('trust proxy', 1); // Behind nginx - use real client IP for rate limiting
+app.disable('x-powered-by');
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -179,25 +203,41 @@ app.get('/api/auth/status', (req, res) => {
   res.json({ authRequired: AUTH_ENABLED });
 });
 
+// Per-IP login rate limiting (brute-force protection)
+const loginAttempts = new Map(); // ip -> { failures, windowStart, blockedUntil }
+const LOGIN_MAX_FAILURES = 10;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
 // Login endpoint - returns a token for session-based auth
 app.post('/api/auth/login', (req, res) => {
   if (!AUTH_ENABLED) {
     return res.status(405).json({ error: 'Authentication is not enabled' });
   }
 
+  const now = Date.now();
+  const ip = req.ip;
+  let entry = loginAttempts.get(ip);
+  if (!entry || now - entry.windowStart > LOGIN_WINDOW_MS) {
+    entry = { failures: 0, windowStart: now, blockedUntil: 0 };
+    loginAttempts.set(ip, entry);
+  }
+
+  if (now < entry.blockedUntil) {
+    return res.status(429).json({ error: 'Too many failed attempts. Try again in 15 minutes.' });
+  }
+
   const { user, password } = req.body;
 
   if (user === LND_USER && password === LND_PASSWORD) {
-    // Generate a simple token (base64-encoded JSON with expiry)
-    const tokenData = {
-      user: LND_USER,
-      pass: LND_PASSWORD,
-      ts: Date.now()
-    };
-    const token = Buffer.from(JSON.stringify(tokenData)).toString('base64');
-
-    res.json({ success: true, token });
+    entry.failures = 0;
+    res.json({ success: true, token: createSession() });
   } else {
+    entry.failures++;
+    if (entry.failures >= LOGIN_MAX_FAILURES) {
+      entry.blockedUntil = now + LOGIN_WINDOW_MS;
+      entry.failures = 0;
+      stderrLog(`[AUTH] Too many failed logins from ${ip} - blocking for 15 minutes`);
+    }
     res.status(401).json({ error: 'Invalid credentials' });
   }
 });
@@ -206,6 +246,13 @@ app.post('/api/auth/login', (req, res) => {
 
 // Apply auth middleware to all /api routes (except auth endpoints above)
 app.use('/api', authenticate);
+
+// Logout endpoint - invalidates the session token (requires valid token)
+app.post('/api/auth/logout', (req, res) => {
+  const token = req.headers['x-lnd-token'];
+  if (token) authSessions.delete(token);
+  res.json({ success: true });
+});
 
 // Get server info and local IP addresses
 app.get('/api/info', (req, res) => {
@@ -388,15 +435,8 @@ function authenticateWebSocket(req) {
   const urlParams = new URL(req.url, `http://localhost:${PORT}`);
   const token = urlParams.searchParams.get('token');
   
-  if (token) {
-    try {
-      const decoded = JSON.parse(Buffer.from(token, 'base64').toString('utf-8'));
-      if (decoded.user === LND_USER && decoded.pass === LND_PASSWORD && Date.now() - decoded.ts < 86400000) {
-        return true;
-      }
-    } catch (e) {
-      // Invalid token
-    }
+  if (token && isValidSession(token)) {
+    return true;
   }
 
   return false;

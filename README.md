@@ -128,6 +128,7 @@ All endpoints (except auth endpoints) require authentication when `LND_USER` and
 |---|---|---|---|
 | `GET` | `/api/auth/status` | Check if authentication is enabled | No |
 | `POST` | `/api/auth/login` | Login and receive a token (`{ user, password }`) | No |
+| `POST` | `/api/auth/logout` | Invalidate the current session token | Yes |
 | `GET` | `/api/info` | Server info, local IPs, client count | Yes |
 | `GET` | `/api/items` | List last 50 received items | Yes |
 | `POST` | `/api/items/clear` | Clear all items | Yes |
@@ -150,14 +151,14 @@ curl http://localhost:4200/api/auth/status
 curl -X POST http://localhost:4200/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"user":"admin","password":"supersecret"}'
-# Response: { "success": true, "token": "eyJ1c2VyIjoi..." }
+# Response: { "success": true, "token": "9f2c8a..." }
 
 # 3. Use the token in subsequent requests
 curl http://localhost:4200/api/info \
-  -H "X-LND-Token: eyJ1c2VyIjoi..."
+  -H "X-LND-Token: 9f2c8a..."
 ```
 
-> Tokens are valid for **24 hours** and are stored in `sessionStorage` on the client side (cleared when the browser tab closes).
+> Tokens are opaque, server-side sessions valid for **24 hours**. The client stores them in `localStorage`. Tokens can be revoked early via `POST /api/auth/logout`.
 
 ### WebSocket Messages
 
@@ -205,7 +206,7 @@ LocalNetworkDropper/
 - Maximum file size: 100MB per file
 - Uploaded files are auto-deleted after 24 hours
 - Authentication is optional but recommended when exposing the service outside your LAN
-- Tokens expire after 24 hours and are stored in browser `sessionStorage`
+- Tokens are opaque, server-side sessions (the password is never embedded in them), expire after 24 hours, and are stored in browser `localStorage`
 - The Docker container runs as a non-root user (`appuser`) for added security
 
 ## 🐳 Docker Deployment
